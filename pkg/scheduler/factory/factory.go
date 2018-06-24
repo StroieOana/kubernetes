@@ -1079,7 +1079,7 @@ func (c *configFactory) CreateFromKeys(predicateKeys, priorityKeys sets.String, 
 		glog.Info("Created equivalence class cache")
 	}
 
-	algo := core.NewGenericScheduler(
+	/*algo := core.NewGenericScheduler(
 		c.schedulerCache,
 		c.equivalencePodCache,
 		c.podQueue,
@@ -1092,7 +1092,11 @@ func (c *configFactory) CreateFromKeys(predicateKeys, priorityKeys sets.String, 
 		c.pVCLister,
 		c.alwaysCheckAllPredicates,
 		c.disablePreemption,
-	)
+	)*/
+	// TODO(oanas): this should be upper in flow
+	//algo := core.NewGenericScheduler(c.schedulerCache, c.equivalencePodCache, c.podQueue, predicateFuncs, predicateMetaProducer, priorityConfigs, priorityMetaProducer, extenders, c.volumeBinder, c.pVCLister, c.alwaysCheckAllPredicates)
+	glog.V(4).Infof("Using first node scheduler")
+	algo := core.NewFirstNodeScheduler(c.schedulerCache, c.equivalencePodCache, c.podQueue, predicateFuncs, predicateMetaProducer, priorityConfigs, priorityMetaProducer, extenders, c.volumeBinder, c.pVCLister, c.alwaysCheckAllPredicates)
 
 	podBackoff := util.CreateDefaultPodBackoff()
 	return &scheduler.Config{

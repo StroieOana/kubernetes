@@ -86,3 +86,16 @@ type ScheduleAlgorithm interface {
 	// testing.
 	Prioritizers() []PriorityConfig
 }
+
+// TODO comment
+type PodNodeAssignment struct {
+	Pod *v1.Pod
+	SelectedMachine string
+}
+
+// ScheduleAlgorithm is an interface implemented by things that know how to schedule pods
+// onto machines.
+type RescheduleAlgorithm interface {
+	// Returns pods that need to be reassigned on nodes
+	Schedule(*v1.Pod, NodeLister) ([]*PodNodeAssignment, error)
+}
