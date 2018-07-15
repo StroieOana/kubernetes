@@ -56,6 +56,7 @@ import (
 	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 	"k8s.io/kubernetes/pkg/scheduler"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm"
+	"k8s.io/kubernetes/pkg/scheduler/algorithm/reschedule_algorithm"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm/predicates"
 	schedulerapi "k8s.io/kubernetes/pkg/scheduler/api"
 	"k8s.io/kubernetes/pkg/scheduler/api/validation"
@@ -942,6 +943,7 @@ func (c *configFactory) deletePDBFromCache(obj interface{}) {
 
 // Create creates a scheduler with the default algorithm provider.
 func (c *configFactory) Create() (*scheduler.Config, error) {
+	glog.V(4).Infof("[Oana] Create called")
 	return c.CreateFromProvider(DefaultProvider)
 }
 
@@ -1079,7 +1081,7 @@ func (c *configFactory) CreateFromKeys(predicateKeys, priorityKeys sets.String, 
 		glog.Info("Created equivalence class cache")
 	}
 
-	/*algo := core.NewGenericScheduler(
+	algo := core.NewGenericScheduler(
 		c.schedulerCache,
 		c.equivalencePodCache,
 		c.podQueue,
@@ -1092,11 +1094,13 @@ func (c *configFactory) CreateFromKeys(predicateKeys, priorityKeys sets.String, 
 		c.pVCLister,
 		c.alwaysCheckAllPredicates,
 		c.disablePreemption,
-	)*/
+	)
 	// TODO(oanas): this should be upper in flow
-	//algo := core.NewGenericScheduler(c.schedulerCache, c.equivalencePodCache, c.podQueue, predicateFuncs, predicateMetaProducer, priorityConfigs, priorityMetaProducer, extenders, c.volumeBinder, c.pVCLister, c.alwaysCheckAllPredicates)
-	glog.V(4).Infof("Using first node scheduler")
-	algo := core.NewFirstNodeScheduler(c.schedulerCache, c.equivalencePodCache, c.podQueue, predicateFuncs, predicateMetaProducer, priorityConfigs, priorityMetaProducer, extenders, c.volumeBinder, c.pVCLister, c.alwaysCheckAllPredicates)
+	glog.V(4).Infof("[Oana] Adding rescheduler too")
+	// TODO use a different cache! until we use only one scheduler
+	//algo := core.NewFirstNodeScheduler(c.schedulerCache, c.equivalencePodCache, c.podQueue, predicateFuncs, predicateMetaProducer, priorityConfigs, priorityMetaProducer, extenders, c.volumeBinder, c.pVCLister, c.alwaysCheckAllPredicates)
+	// TODO(oanas): based on mode use autoscaler or default
+	rescheduleAlgo := reschedule_algorithm.NewClusterAutoscalerRescheduleAlgorithm(c.schedulerCache)
 
 	podBackoff := util.CreateDefaultPodBackoff()
 	return &scheduler.Config{
@@ -1105,6 +1109,7 @@ func (c *configFactory) CreateFromKeys(predicateKeys, priorityKeys sets.String, 
 		// The scheduler only needs to consider schedulable nodes.
 		NodeLister:          &nodeLister{c.nodeLister},
 		Algorithm:           algo,
+		RescheduleAlgorithm: rescheduleAlgo,
 		GetBinder:           c.getBinderFunc(extenders),
 		PodConditionUpdater: &podConditionUpdater{c.client},
 		PodPreemptor:        &podPreemptor{c.client},

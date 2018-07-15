@@ -108,6 +108,7 @@ type Config struct {
 	Ecache     *equivalence.Cache
 	NodeLister algorithm.NodeLister
 	Algorithm  algorithm.ScheduleAlgorithm
+	RescheduleAlgorithm  algorithm.RescheduleAlgorithm
 	GetBinder  func(pod *v1.Pod) Binder
 	// PodConditionUpdater is used only in case of scheduling errors. If we succeed
 	// with scheduling, PodScheduled condition will be updated in apiserver in /bind
@@ -205,6 +206,27 @@ func (sched *Scheduler) schedule(pod *v1.Pod) (string, error) {
 		return "", err
 	}
 	return host, err
+}
+
+// TODO(oana)
+func (sched *Scheduler) reschedule(pod *v1.Pod) ([]*algorithm.PodNodeAssignment, error) {
+	glog.V(4).Infof("[Oana] Calling reschedule...")
+	fmt.Println("[Oana] Calling reschedule...")
+	newPodMappings, err := sched.config.RescheduleAlgorithm.Schedule(pod, sched.config.NodeLister)
+	if err != nil {
+		glog.V(1).Infof("Failed to schedule pod: %v/%v", pod.Namespace, pod.Name)
+		pod = pod.DeepCopy()
+		sched.config.Error(pod, err)
+		sched.config.Recorder.Eventf(pod, v1.EventTypeWarning, "FailedScheduling", "%v", err)
+		sched.config.PodConditionUpdater.Update(pod, &v1.PodCondition{
+			Type:    v1.PodScheduled,
+			Status:  v1.ConditionFalse,
+			Reason:  v1.PodReasonUnschedulable,
+			Message: err.Error(),
+		})
+		return []*algorithm.PodNodeAssignment{}, err
+	}
+	return newPodMappings, err
 }
 
 // preempt tries to create room for a pod that has failed to schedule, by preempting lower priority pods if possible.
@@ -446,10 +468,23 @@ func (sched *Scheduler) scheduleOne() {
 	}
 
 	glog.V(3).Infof("Attempting to schedule pod: %v/%v", pod.Namespace, pod.Name)
+	fmt.Printf("Attempting to schedule pod: %v/%v", pod.Namespace, pod.Name)
 
 	// Synchronously attempt to find a fit for the pod.
 	start := time.Now()
-	suggestedHost, err := sched.schedule(pod)
+	//suggestedHost, err := sched.schedule(pod)
+
+	//
+	newPodMappings, err := sched.reschedule(pod)
+
+	scheduledString := "Mapping after reschedule: "
+	for _, podMapping := range(newPodMappings) {
+		scheduledString = fmt.Sprintf("%s Node %s: pod %s %s \n", scheduledString, podMapping.SelectedMachine,
+			podMapping.Pod.Name, podMapping.Pod.Namespace)
+	}
+	glog.V(4).Infof("[Oana] After reschedule: %s ", scheduledString)
+	fmt.Printf("[Oana] After reschedule: %s", scheduledString)
+
 	if err != nil {
 		// schedule() may have failed because the pod would not fit on any host, so we try to
 		// preempt, with the expectation that the next time the pod is tried for scheduling it
@@ -464,44 +499,55 @@ func (sched *Scheduler) scheduleOne() {
 		}
 		return
 	}
+
 	metrics.SchedulingAlgorithmLatency.Observe(metrics.SinceInMicroseconds(start))
 	// Tell the cache to assume that a pod now is running on a given node, even though it hasn't been bound yet.
 	// This allows us to keep scheduling without waiting on binding to occur.
-	assumedPod := pod.DeepCopy()
 
-	// Assume volumes first before assuming the pod.
-	//
-	// If no volumes need binding, then nil is returned, and continue to assume the pod.
-	//
-	// Otherwise, error is returned and volume binding is started asynchronously for all of the pod's volumes.
-	// scheduleOne() returns immediately on error, so that it doesn't continue to assume the pod.
-	//
-	// After the asynchronous volume binding updates are made, it will send the pod back through the scheduler for
-	// subsequent passes until all volumes are fully bound.
-	//
-	// This function modifies 'assumedPod' if volume binding is required.
-	err = sched.assumeAndBindVolumes(assumedPod, suggestedHost)
-	if err != nil {
-		return
-	}
-
-	// assume modifies `assumedPod` by setting NodeName=suggestedHost
-	err = sched.assume(assumedPod, suggestedHost)
-	if err != nil {
-		return
-	}
-	// bind the pod to its host asynchronously (we can do this b/c of the assumption step above).
-	go func() {
-		err := sched.bind(assumedPod, &v1.Binding{
-			ObjectMeta: metav1.ObjectMeta{Namespace: assumedPod.Namespace, Name: assumedPod.Name, UID: assumedPod.UID},
-			Target: v1.ObjectReference{
-				Kind: "Node",
-				Name: suggestedHost,
-			},
-		})
-		metrics.E2eSchedulingLatency.Observe(metrics.SinceInMicroseconds(start))
-		if err != nil {
-			glog.Errorf("Internal error binding pod: (%v)", err)
+	for _, podMapping := range(newPodMappings) {
+		// The new pod is not scheduled yet so it is not assumed. thus we don't need to forget it from cache
+		if podMapping.Pod.ObjectMeta.UID != pod.ObjectMeta.UID {
+			sched.config.SchedulerCache.ForgetPod(podMapping.Pod)
 		}
-	}()
+
+		assumedPod := podMapping.Pod.DeepCopy()
+		suggestedHost := podMapping.SelectedMachine
+
+		// Assume volumes first before assuming the pod.
+		//
+		// If no volumes need binding, then nil is returned, and continue to assume the pod.
+		//
+		// Otherwise, error is returned and volume binding is started asynchronously for all of the pod's volumes.
+		// scheduleOne() returns immediately on error, so that it doesn't continue to assume the pod.
+		//
+		// After the asynchronous volume binding updates are made, it will send the pod back through the scheduler for
+		// subsequent passes until all volumes are fully bound.
+		//
+		// This function modifies 'assumedPod' if volume binding is required.
+		err = sched.assumeAndBindVolumes(assumedPod, suggestedHost)
+		if err != nil {
+			return
+		}
+
+		// assume modifies `assumedPod` by setting NodeName=suggestedHost
+		err = sched.assume(assumedPod, suggestedHost)
+		if err != nil {
+			return
+		}
+		// bind the pod to its host asynchronously (we can do this b/c of the assumption step above).
+		go func() {
+			err := sched.bind(assumedPod, &v1.Binding{
+				ObjectMeta: metav1.ObjectMeta{Namespace: assumedPod.Namespace, Name: assumedPod.Name, UID: assumedPod.UID},
+				Target: v1.ObjectReference{
+					Kind: "Node",
+					Name: suggestedHost,
+				},
+			})
+			// TODO this should end after all scheduling ends
+			metrics.E2eSchedulingLatency.Observe(metrics.SinceInMicroseconds(start))
+			if err != nil {
+				glog.Errorf("Internal error binding pod: (%v)", err)
+			}
+		}()
+	}
 }
