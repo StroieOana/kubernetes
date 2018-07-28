@@ -9,11 +9,13 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm"
 	"k8s.io/kubernetes/pkg/scheduler/core"
+	clientset "k8s.io/client-go/kubernetes"
 )
 
 type defaultRescheduler struct {
 	cache schedulercache.Cache
 	cachedNodeInfoMap        map[string]*schedulercache.NodeInfo
+	client clientset.Interface
 }
 
 // nodeScore contains node and score ...
@@ -23,10 +25,14 @@ type nodeInfoScore struct {
 	nodeInfo   *schedulercache.NodeInfo
 }
 
-func NewDefaultRescheduleAlgorithm(cache schedulercache.Cache) algorithm.RescheduleAlgorithm {
+func NewDefaultRescheduleAlgorithm(client clientset.Interface, cache schedulercache.Cache) algorithm.RescheduleAlgorithm {
 	return &defaultRescheduler{
-		cache: cache, cachedNodeInfoMap: make(map[string]*schedulercache.NodeInfo),
+		cache: cache, cachedNodeInfoMap: make(map[string]*schedulercache.NodeInfo), client: client,
 	}
+}
+
+func (rescheduler *defaultRescheduler) GetClient()  clientset.Interface {
+	return rescheduler.client
 }
 
 // TODO- move parts of this to common

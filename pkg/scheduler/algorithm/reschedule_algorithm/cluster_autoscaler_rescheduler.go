@@ -9,6 +9,8 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm"
 	"k8s.io/kubernetes/pkg/scheduler/core"
+	clientset "k8s.io/client-go/kubernetes"
+
 )
 
 // TODO improve (group by size)
@@ -21,6 +23,7 @@ import (
 type clusterAutoscalerRescheduler struct {
 	cache schedulercache.Cache
 	cachedNodeInfoMap        map[string]*schedulercache.NodeInfo
+	client clientset.Interface
 }
 
 // podScore contains Pod and score ...
@@ -30,10 +33,14 @@ type podScore struct {
 	pod   *apiv1.Pod
 }
 
-func NewClusterAutoscalerRescheduleAlgorithm(cache schedulercache.Cache) algorithm.RescheduleAlgorithm {
+func NewClusterAutoscalerRescheduleAlgorithm(client clientset.Interface, cache schedulercache.Cache) algorithm.RescheduleAlgorithm {
 	return &clusterAutoscalerRescheduler{
-		cache: cache, cachedNodeInfoMap: make(map[string]*schedulercache.NodeInfo),
+		cache: cache, cachedNodeInfoMap: make(map[string]*schedulercache.NodeInfo), client: client,
 	}
+}
+
+func (rescheduler *clusterAutoscalerRescheduler) GetClient()  clientset.Interface {
+	return rescheduler.client
 }
 
 func (rescheduler *clusterAutoscalerRescheduler) Schedule(pod *apiv1.Pod, nodeLister algorithm.NodeLister) ([]*algorithm.PodNodeAssignment, error) {
@@ -95,6 +102,7 @@ func (rescheduler *clusterAutoscalerRescheduler) Reschedule(pod *apiv1.Pod, exis
 	for _, nodeInfo := range(existingNodes) {
 		for _, nodePod := range(nodeInfo.Pods()) {
 			if nodePod.Namespace == pod.Namespace{
+				// TODO: terminating pods should not be considered
 				// We only reschedule pods in the same namespace
 				pods = append(pods, nodePod)
 			}

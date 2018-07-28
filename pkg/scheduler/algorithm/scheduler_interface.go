@@ -20,6 +20,7 @@ import (
 	"k8s.io/api/core/v1"
 	schedulerapi "k8s.io/kubernetes/pkg/scheduler/api"
 	schedulercache "k8s.io/kubernetes/pkg/scheduler/cache"
+	clientset "k8s.io/client-go/kubernetes"
 )
 
 // SchedulerExtender is an interface for external processes to influence scheduling
@@ -98,4 +99,6 @@ type PodNodeAssignment struct {
 type RescheduleAlgorithm interface {
 	// Returns pods that need to be reassigned on nodes
 	Schedule(*v1.Pod, NodeLister) ([]*PodNodeAssignment, error)
+	// Returns the client used to create a pod
+	GetClient()  clientset.Interface
 }

@@ -1100,7 +1100,7 @@ func (c *configFactory) CreateFromKeys(predicateKeys, priorityKeys sets.String, 
 	// TODO use a different cache! until we use only one scheduler
 	//algo := core.NewFirstNodeScheduler(c.schedulerCache, c.equivalencePodCache, c.podQueue, predicateFuncs, predicateMetaProducer, priorityConfigs, priorityMetaProducer, extenders, c.volumeBinder, c.pVCLister, c.alwaysCheckAllPredicates)
 	// TODO(oanas): based on mode use autoscaler or default
-	rescheduleAlgo := reschedule_algorithm.NewClusterAutoscalerRescheduleAlgorithm(c.schedulerCache)
+	rescheduleAlgo := reschedule_algorithm.NewClusterAutoscalerRescheduleAlgorithm(c.client, c.schedulerCache)
 
 	podBackoff := util.CreateDefaultPodBackoff()
 	return &scheduler.Config{
