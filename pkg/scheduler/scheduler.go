@@ -210,8 +210,7 @@ func (sched *Scheduler) schedule(pod *v1.Pod) (string, error) {
 
 // TODO(oana)
 func (sched *Scheduler) reschedule(pod *v1.Pod) ([]*algorithm.PodNodeAssignment, error) {
-	glog.V(4).Infof("[Oana] Calling reschedule...")
-	fmt.Println("[Oana] Calling reschedule...")
+	glog.Infof("[Oana] Calling reschedule...")
 	newPodMappings, err := sched.config.RescheduleAlgorithm.Schedule(pod, sched.config.NodeLister)
 	if err != nil {
 		glog.V(1).Infof("Failed to schedule pod: %v/%v", pod.Namespace, pod.Name)
@@ -458,11 +457,7 @@ func (sched *Scheduler) bind(assumed *v1.Pod, b *v1.Binding) error {
 	return nil
 }
 
-// TODO(oana): it is called too many times
-
-// scheduleOne does the entire scheduling workflow for a single pod.  It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne() {
-	//sched.config.podQueue
 	pod := sched.config.NextPod()
 	if pod.DeletionTimestamp != nil {
 		sched.config.Recorder.Eventf(pod, v1.EventTypeWarning, "FailedScheduling", "skip schedule deleting pod: %v/%v", pod.Namespace, pod.Name)
@@ -470,26 +465,41 @@ func (sched *Scheduler) scheduleOne() {
 		return
 	}
 
-	// TODO(oana): check if it's not already assumed - if it is it means it is already assigned but it was created
-	// by the next steps and put back on the scheduler queue even though it shouldn't (it async was used)
-
 	glog.V(3).Infof("Attempting to schedule pod: %v/%v", pod.Namespace, pod.Name)
-	fmt.Printf("Attempting to schedule pod: %v/%v", pod.Namespace, pod.Name)
+
+	// We only do reshedule for default namespace
+	if pod.Namespace == "default" {
+		glog.Infof("[Oana] using new flow")
+		sched.scheduleOneWithReschedule(pod)
+	} else {
+		glog.Infof("[Oana] using old flow")
+		sched.scheduleOneOldFlow(pod)
+	}
+}
+
+// scheduleOne does the entire scheduling workflow for a single pod.  It is serialized on the scheduling algorithm's host fitting.
+func (sched *Scheduler) scheduleOneWithReschedule(pod *v1.Pod) {
+	// Needed due to binding pods async: the pods recreated might be added to the scheduler queue.
+	// We avoid rescheduling them by checking if they are already assumed
+	isAssumed, err := sched.config.SchedulerCache.IsAssumedPod(pod)
+	if err == nil && isAssumed {
+		glog.Infof("[Oana] Pod already assumed", err)
+		return
+	}
+
+	glog.Infof("Attempting to schedule pod: %v/%v", pod.Namespace, pod.Name)
 
 	// Synchronously attempt to find a fit for the pod.
 	start := time.Now()
-	//suggestedHost, err := sched.schedule(pod)
 
-	//
 	newPodMappings, err := sched.reschedule(pod)
 
 	scheduledString := "Mapping after reschedule: "
 	for _, podMapping := range newPodMappings {
-		scheduledString = fmt.Sprintf("%s Node %s: pod %s %s \n", scheduledString, podMapping.SelectedMachine,
-			podMapping.Pod.Name, podMapping.Pod.Namespace)
+		scheduledString = fmt.Sprintf("%s pod %s: node %s;", scheduledString,
+			podMapping.Pod.Name, podMapping.SelectedMachine)
 	}
-	glog.V(4).Infof("[Oana] After reschedule: %s ", scheduledString)
-	fmt.Printf("[Oana] After reschedule: %s", scheduledString)
+	glog.Infof("[Oana] After reschedule: %s ", scheduledString)
 
 	if err != nil {
 		// schedule() may have failed because the pod would not fit on any host, so we try to
@@ -510,25 +520,29 @@ func (sched *Scheduler) scheduleOne() {
 	// Tell the cache to assume that a pod now is running on a given node, even though it hasn't been bound yet.
 	// This allows us to keep scheduling without waiting on binding to occur.
 
+	// We need to delete all pods that need to be rescheduled (otherwise we will not have enough place to move them)
 	for _, podMapping := range newPodMappings {
-		glog.Infof("[Oana] Trying to assume pod %v to host %s", podMapping, podMapping.SelectedMachine)
+		if podMapping.Pod.ObjectMeta.UID != pod.ObjectMeta.UID {
+			glog.Infof("[Oana] Deleting pod: %s (uid: %s)\n", podMapping.Pod.Name, podMapping.Pod.ObjectMeta.UID)
+			if err := sched.config.PodPreemptor.DeletePod(podMapping.Pod); err != nil {
+				glog.Errorf("[Oana] Error deleting pod !!! %v/%v: %v", podMapping.Pod.Namespace, podMapping.Pod.Name, err)
+				// TODO remove this mapping from newPodMapping if this happens
+			}
+		}
+	}
+
+	for _, podMapping := range newPodMappings {
+		glog.Infof("[Oana] Trying to schedule pod %v to host %s", podMapping.Pod.Name, podMapping.SelectedMachine)
 		assumedPod := podMapping.Pod.DeepCopy()
 		canBeAssumed := true
 		// The new pod is not scheduled yet so it is not assumed. thus we don't need to remove it from cache
 		if podMapping.Pod.ObjectMeta.UID != pod.ObjectMeta.UID {
-			glog.Infof("[Oana] Removing pod: %s (uid: %s)\n", podMapping.Pod.Name, podMapping.Pod.ObjectMeta.UID)
-			//err = sched.config.SchedulerCache.RemovePod(podMapping.Pod)
-			//if err != nil {
-			//	glog.Infof("[Oana] Error while removing pod: %s. Error %v ", podMapping.Pod.Name, err)
-			//	canBeAssumed = false
-			//}
-			// TODO(oana) May not work to assign after delete pod, the pod will not exist anymore
 			client := sched.config.RescheduleAlgorithm.GetClient()
 			toBeCreatedPod := podMapping.Pod.DeepCopy()
 			toBeCreatedPod.ObjectMeta.UID = ""
 			toBeCreatedPod.ObjectMeta.ResourceVersion = ""
 			// TODO - use time now as suffix
-			toBeCreatedPod.Name = fmt.Sprintf("%s-v2", podMapping.Pod.Name)
+			toBeCreatedPod.Name = fmt.Sprintf("%s-%s", podMapping.Pod.Name, time.Now().Format("20060102150405"))
 			/*
 			&api.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -555,16 +569,10 @@ func (sched *Scheduler) scheduleOne() {
 					SchedulerName:   api.DefaultSchedulerName,
 				},
 			*/
-			// TODO(oana)!!! might not have enough resources to move all one after the other. Case: two should exchange places.
-			// TODO: remove all first, then create them and assign as wanted.
-
-			// Remove the old one. deployment controller might delete one of the pods anyway :(
-			// TODO(oana): make the deployment controller wait? force it to not remove the new pods..
-			// TODO: solution: use pods directly, no deployment
-			if err := sched.config.PodPreemptor.DeletePod(podMapping.Pod); err != nil {
+			/*if err := sched.config.PodPreemptor.DeletePod(podMapping.Pod); err != nil {
 				glog.Errorf("Error preempting pod %v/%v: %v", podMapping.Pod.Namespace, podMapping.Pod.Name, err)
 				canBeAssumed = false
-			}
+			}*/
 
 			toBeCreatedPod.Spec.NodeName = ""
 			if newPod, err := client.CoreV1().Pods(podMapping.Pod.Namespace).Create(toBeCreatedPod); err != nil {
@@ -573,8 +581,7 @@ func (sched *Scheduler) scheduleOne() {
 				canBeAssumed = false
 			} else {
 				assumedPod = newPod
-				glog.Infof("[Oana] Created a new pod %v: %v from old pod that was deleted", newPod, podMapping.Pod)
-
+				glog.Infof("[Oana] Created a new pod %v: %v from old pod that was deleted", newPod.Name, podMapping.Pod.Name)
 				glog.Infof("[Oana] Checking the cache for the new pod %s\n", assumedPod.ObjectMeta.UID)
 				isAssumed, err := sched.config.SchedulerCache.IsAssumedPod(newPod)
 				if err != nil {
@@ -591,31 +598,20 @@ func (sched *Scheduler) scheduleOne() {
 					glog.Infof("[Oana] Trying to remove pod from cache: %v", podFromCache.ObjectMeta.UID)
 					err = sched.config.SchedulerCache.RemovePod(podFromCache)
 					if err != nil {
-						glog.Infof("[Oana] Error while removing pod: %s. Error %v ", podMapping.Pod.Name, err)
+						glog.Infof("[Oana] Error while removing pod from cache: %s. Error %v ", podMapping.Pod.Name, err)
 						canBeAssumed = false
 					}
 				}
 			}
 		}
 		if !canBeAssumed {
-			glog.Infof("[Oana] The pod: %s was not removed. can't be assumed \n", podMapping.Pod.Name)
+			glog.Infof("[Oana] The pod: %s was not recreated. can't be assumed \n", podMapping.Pod.Name)
 			continue
 		}
 
 		suggestedHost := podMapping.SelectedMachine
 		glog.Infof("[Oana] Assuming pod %s on host %s", assumedPod.Name, suggestedHost)
 
-		// Assume volumes first before assuming the pod.
-		//
-		// If no volumes need binding, then nil is returned, and continue to assume the pod.
-		//
-		// Otherwise, error is returned and volume binding is started asynchronously for all of the pod's volumes.
-		// scheduleOne() returns immediately on error, so that it doesn't continue to assume the pod.
-		//
-		// After the asynchronous volume binding updates are made, it will send the pod back through the scheduler for
-		// subsequent passes until all volumes are fully bound.
-		//
-		// This function modifies 'assumedPod' if volume binding is required.
 		err = sched.assumeAndBindVolumes(assumedPod, suggestedHost)
 		if err != nil {
 			return
@@ -626,12 +622,10 @@ func (sched *Scheduler) scheduleOne() {
 		if err != nil {
 			return
 		}
+
 		// bind the pod to its host asynchronously (we can do this b/c of the assumption step above).
-		// TODO(oana)!!!: should work with async too due to binding. for now something is wrong and creating a new pod adds it to the scheduler queue
-		// Maybe checking if it is not bounded already as a first step
-		//go func() {
+		go func() {
 			glog.V(4).Infof("[Oana] Binding pod %s to node %s", assumedPod.Name, suggestedHost)
-			fmt.Printf("[Oana] Binding pod %s to node %s", assumedPod.Name, suggestedHost)
 			err := sched.bind(assumedPod, &v1.Binding{
 				ObjectMeta: metav1.ObjectMeta{Namespace: assumedPod.Namespace, Name: assumedPod.Name, UID: assumedPod.UID},
 				Target: v1.ObjectReference{
@@ -639,13 +633,75 @@ func (sched *Scheduler) scheduleOne() {
 					Name: suggestedHost,
 				},
 			})
-			// TODO(oana): this should end after all scheduling ends
 			metrics.E2eSchedulingLatency.Observe(metrics.SinceInMicroseconds(start))
+			glog.Infof("[Oana] Scheduling took %v", metrics.SinceInMicroseconds(start))
+
 			if err != nil {
-				glog.V(4).Infof("[Oana] Error binding pod %s to node %s", assumedPod.Name, suggestedHost)
-				fmt.Printf("[Oana] Error binding pod %s to node %s", assumedPod.Name, suggestedHost)
+				glog.Infof("[Oana] Error binding pod %s to node %s", assumedPod.Name, suggestedHost)
 				glog.Errorf("Internal error binding pod: (%v)", err)
 			}
-		//}()
+		}()
 	}
+}
+
+
+// scheduleOne does the entire scheduling workflow for a single pod.  It is serialized on the scheduling algorithm's host fitting.
+func (sched *Scheduler) scheduleOneOldFlow(pod *v1.Pod) {
+	// Synchronously attempt to find a fit for the pod.
+	start := time.Now()
+	suggestedHost, err := sched.schedule(pod)
+	if err != nil {
+		// schedule() may have failed because the pod would not fit on any host, so we try to
+		// preempt, with the expectation that the next time the pod is tried for scheduling it
+		// will fit due to the preemption. It is also possible that a different pod will schedule
+		// into the resources that were preempted, but this is harmless.
+		if fitError, ok := err.(*core.FitError); ok {
+			preemptionStartTime := time.Now()
+			sched.preempt(pod, fitError)
+			metrics.PreemptionAttempts.Inc()
+			metrics.SchedulingAlgorithmPremptionEvaluationDuration.Observe(metrics.SinceInMicroseconds(preemptionStartTime))
+			metrics.SchedulingLatency.WithLabelValues(metrics.PreemptionEvaluation).Observe(metrics.SinceInSeconds(preemptionStartTime))
+		}
+		return
+	}
+	metrics.SchedulingAlgorithmLatency.Observe(metrics.SinceInMicroseconds(start))
+	// Tell the cache to assume that a pod now is running on a given node, even though it hasn't been bound yet.
+	// This allows us to keep scheduling without waiting on binding to occur.
+	assumedPod := pod.DeepCopy()
+
+	// Assume volumes first before assuming the pod.
+	//
+	// If no volumes need binding, then nil is returned, and continue to assume the pod.
+	//
+	// Otherwise, error is returned and volume binding is started asynchronously for all of the pod's volumes.
+	// scheduleOne() returns immediately on error, so that it doesn't continue to assume the pod.
+	//
+	// After the asynchronous volume binding updates are made, it will send the pod back through the scheduler for
+	// subsequent passes until all volumes are fully bound.
+	//
+	// This function modifies 'assumedPod' if volume binding is required.
+	err = sched.assumeAndBindVolumes(assumedPod, suggestedHost)
+	if err != nil {
+		return
+	}
+
+	// assume modifies `assumedPod` by setting NodeName=suggestedHost
+	err = sched.assume(assumedPod, suggestedHost)
+	if err != nil {
+		return
+	}
+	// bind the pod to its host asynchronously (we can do this b/c of the assumption step above).
+	go func() {
+		err := sched.bind(assumedPod, &v1.Binding{
+			ObjectMeta: metav1.ObjectMeta{Namespace: assumedPod.Namespace, Name: assumedPod.Name, UID: assumedPod.UID},
+			Target: v1.ObjectReference{
+				Kind: "Node",
+				Name: suggestedHost,
+			},
+		})
+		metrics.E2eSchedulingLatency.Observe(metrics.SinceInMicroseconds(start))
+		if err != nil {
+			glog.Errorf("Internal error binding pod: (%v)", err)
+		}
+	}()
 }

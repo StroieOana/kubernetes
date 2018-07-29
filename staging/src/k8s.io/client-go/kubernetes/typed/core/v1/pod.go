@@ -25,6 +25,7 @@ import (
 	watch "k8s.io/apimachinery/pkg/watch"
 	scheme "k8s.io/client-go/kubernetes/scheme"
 	rest "k8s.io/client-go/rest"
+	"github.com/golang/glog"
 )
 
 // PodsGetter has a method to return a PodInterface.
@@ -139,6 +140,9 @@ func (c *pods) UpdateStatus(pod *v1.Pod) (result *v1.Pod, err error) {
 
 // Delete takes name of the pod and deletes it. Returns an error if one occurs.
 func (c *pods) Delete(name string, options *meta_v1.DeleteOptions) error {
+	glog.Infof("[Oana] Removing pod with 0 grace period")
+	gracePeriodSeconds := int64(0)
+	options.GracePeriodSeconds = &gracePeriodSeconds
 	return c.client.Delete().
 		Namespace(c.ns).
 		Resource("pods").
