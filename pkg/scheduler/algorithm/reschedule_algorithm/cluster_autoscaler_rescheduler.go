@@ -5,20 +5,18 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	schedulercache "k8s.io/kubernetes/pkg/scheduler/cache"
 	"sort"
-	resource_api "k8s.io/kubernetes/pkg/api/v1/resource"
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm"
 	"k8s.io/kubernetes/pkg/scheduler/core"
 	clientset "k8s.io/client-go/kubernetes"
+	"sync"
 
 )
 
-// TODO improve (group by size)
 // TODO create alg that searches all states and returns the best, and test this against it
 // TODO group pods based on their dimension!! (otherwise bigger pods will probably not be scheduled as expected)
 	// also sort nodes based on dimension to not fragment smaller nodes?
 	// !!! Maybe a better logic is needed on how to choose the first node
-	// TODO try iterating over pods first - bigger -> smaller - and score nodes based on this
 
 type clusterAutoscalerRescheduler struct {
 	cache schedulercache.Cache
@@ -45,8 +43,8 @@ func (rescheduler *clusterAutoscalerRescheduler) GetClient()  clientset.Interfac
 
 func (rescheduler *clusterAutoscalerRescheduler) Schedule(pod *apiv1.Pod, nodeLister algorithm.NodeLister) ([]*algorithm.PodNodeAssignment, error) {
 	nodes, err := nodeLister.List()
-	fmt.Printf("Nr of listed nodes %d\n", len(nodes))
-	glog.V(4).Infof("[Oana][Rescheduler] Nr of listed nodes%d\n", len(nodes))
+	//fmt.Printf("Nr of listed nodes %d\n", len(nodes))
+	glog.Infof("[Oana][Rescheduler] Nr of listed nodes %d\n", len(nodes))
 	if err != nil {
 		return []*algorithm.PodNodeAssignment{}, err
 	}
@@ -57,8 +55,8 @@ func (rescheduler *clusterAutoscalerRescheduler) Schedule(pod *apiv1.Pod, nodeLi
 	// Used for all fit and priority funcs.
 	err = rescheduler.cache.UpdateNodeNameToInfoMap(rescheduler.cachedNodeInfoMap)
 	if err != nil {
-		fmt.Println("Error while updating mapping")
-		glog.V(4).Infof("[Oana][Rescheduler] Error while updating mapping %v", err)
+		//fmt.Println("Error while updating mapping")
+		glog.Infof("[Oana][Rescheduler] Error while updating mapping %v", err)
 		return []*algorithm.PodNodeAssignment{}, err
 	}
 
@@ -77,8 +75,8 @@ func (rescheduler *clusterAutoscalerRescheduler) Schedule(pod *apiv1.Pod, nodeLi
 
 	newNodeInfos, err := rescheduler.Reschedule(pod, nodeInfos)
 	if err != nil {
-		fmt.Println("Error while rescheduling")
-		glog.V(4).Infof("[Oana][Rescheduler] Error while rescheduling %v", err)
+		//fmt.Println("Error while rescheduling")
+		glog.Infof("[Oana][Rescheduler] Error while rescheduling %v", err)
 		return []*algorithm.PodNodeAssignment{}, err
 	}
 
@@ -110,19 +108,26 @@ func (rescheduler *clusterAutoscalerRescheduler) Reschedule(pod *apiv1.Pod, exis
 	}
 	// Also add the pod to be scheduled
 	pods = append(pods, pod)
-	fmt.Printf("Nr of pods to reschedule %d\n", len(pods))
-	glog.V(4).Infof("[Oana][Rescheduler] Nr of pods to reschedule %d\n", len(pods))
+	//fmt.Printf("Nr of pods to reschedule %d\n", len(pods))
+	glog.Infof("[Oana][Rescheduler] Nr of pods to reschedule %d", len(pods))
 
 	// Create a list with empty nodes from the list of existing nodes
 	nodes := make([]*schedulercache.NodeInfo, 0)
 	for _, nodeInfo := range(existingNodes) {
-		//newNodeInfo := schedulercache.NewNodeInfo(nodeInfo.Pods()...)
-		newNodeInfo := schedulercache.NewNodeInfo()
+		podsDifferentNamespace := make([]*apiv1.Pod, 0)
+		for _, p := range(nodeInfo.Pods()) {
+			// The pods that are not in the same namespace will not be reschedule.
+			// We need to leave them on the node (to be taken into consideration when checking resources)
+			if p.Namespace != pod.Namespace {
+				podsDifferentNamespace = append(podsDifferentNamespace, p)
+			}
+		}
+		newNodeInfo := schedulercache.NewNodeInfo(podsDifferentNamespace...)
 		newNodeInfo.SetNode(nodeInfo.Node())
 		nodes = append(nodes, newNodeInfo)
 	}
-	fmt.Printf("Nr of nodes %d\n", len(nodes))
-	glog.V(4).Infof("[Oana][Rescheduler] Nr of nodes %d\n", len(nodes))
+	//fmt.Printf("Nr of nodes %d\n", len(nodes))
+	glog.Infof("[Oana][Rescheduler] Nr of nodes %d", len(nodes))
 
 	// Taken from https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/estimator/binpacking_estimator.go#L60
 	// nodeWithPod function returns NodeInfo, which is a copy of nodeInfo argument with an additional pod scheduled on it.
@@ -137,13 +142,13 @@ func (rescheduler *clusterAutoscalerRescheduler) Reschedule(pod *apiv1.Pod, exis
 	// TODO early quit if not enough resources
 	for i, nodeInfo := range(nodes) {
 		if len(pods) == 0 {
-			fmt.Println("No more pods to schedule")
-			glog.V(4).Infof("[Oana][Rescheduler] No more pods to schedule")
+			//fmt.Println("No more pods to schedule")
+			glog.Infof("[Oana][Rescheduler] No more pods to schedule")
 			break
 		}
 
-		fmt.Printf("[Oana][Rescheduler] Trying to fill node: %s", nodeInfo.Node().Name)
-		glog.V(4).Infof("[Oana][Rescheduler] Trying to fill node: %s", nodeInfo.Node().Name)
+		//fmt.Printf("[Oana][Rescheduler] Trying to fill node: %s", nodeInfo.Node().Name)
+		glog.Infof("[Oana][Rescheduler] Trying to fill node: %s", nodeInfo.Node().Name)
 		podInfos := rescheduler.score(pods, nodeInfo)
 		for len(podInfos) > 0 {
 			// Order scored pods
@@ -151,35 +156,30 @@ func (rescheduler *clusterAutoscalerRescheduler) Reschedule(pod *apiv1.Pod, exis
 			sort.Slice(podInfos, func(i, j int) bool { return podInfos[i].score > podInfos[j].score })
 
 			chosenPod := podInfos[0].pod
-			fmt.Printf("[Oana][Rescheduler] Chose pod with resources (%v %v) and best score: %v\n",
-				resource_api.GetResourceRequest(chosenPod, apiv1.ResourceCPU),
-				resource_api.GetResourceRequest(chosenPod, apiv1.ResourceMemory),
-				podInfos[0].score,
-			)
+			//fmt.Printf("[Oana][Rescheduler] Chose pod with resources (%v %v) and best score: %v\n",
+			//	resource_api.GetResourceRequest(chosenPod, apiv1.ResourceCPU),
+			//	resource_api.GetResourceRequest(chosenPod, apiv1.ResourceMemory),
+			//	podInfos[0].score,
+			//)
 
-			glog.V(4).Infof("[Oana][Rescheduler] Chose pod with resources (%v %v) and best score: %v\n",
-				resource_api.GetResourceRequest(chosenPod, apiv1.ResourceCPU),
-				resource_api.GetResourceRequest(chosenPod, apiv1.ResourceMemory),
-				podInfos[0].score)
+			glog.Infof("[Oana][Rescheduler] Chose pod %v with score: %v\n", getPodToString(chosenPod), podInfos[0].score)
 
 			// Schedule pod with best score
 			nodeInfo = nodeWithPod(nodeInfo, chosenPod)
 			nodes[i] = nodeInfo
 
-			fmt.Printf("[Oana][Rescheduler] After scheduled pod, node : requested resources (%v, %v) allocatable resources (%v %v)\n",
-				nodeInfo.RequestedResource().MilliCPU, nodeInfo.RequestedResource().Memory,
-				nodeInfo.AllocatableResource().MilliCPU, nodeInfo.AllocatableResource().Memory,
-			)
-			glog.V(4).Infof("[Oana][Rescheduler] After scheduled pod, node : requested resources (%v, %v) allocatable resources (%v %v)",
-				nodeInfo.RequestedResource().MilliCPU, nodeInfo.RequestedResource().Memory,
-				nodeInfo.AllocatableResource().MilliCPU, nodeInfo.AllocatableResource().Memory)
+			//fmt.Printf("[Oana][Rescheduler] After scheduled pod, node : requested resources (%v, %v) allocatable resources (%v %v)\n",
+			//	nodeInfo.RequestedResource().MilliCPU, nodeInfo.RequestedResource().Memory,
+			//	nodeInfo.AllocatableResource().MilliCPU, nodeInfo.AllocatableResource().Memory,
+			//)
+			glog.Infof("[Oana][Rescheduler] Node after schedule: %v", getNodeInfoToString(nodeInfo))
 
 			pods = removePodFromList(chosenPod, pods)
 
 			// Recalculate score for pods now that the node resources have changed
 			podInfos = rescheduler.score(pods, nodeInfo)
 		}
-		fmt.Println()
+		//fmt.Println()
 	}
 	// If we still have pods to schedule it means we didn't find a scheduling that includes all. error
 	if len(pods) > 0 {
@@ -203,22 +203,37 @@ func removePodFromList(pod *apiv1.Pod, pods []*apiv1.Pod) []*apiv1.Pod {
 }
 
 func (rescheduler *clusterAutoscalerRescheduler) score(pods []*apiv1.Pod, node *schedulercache.NodeInfo) []*podScore {
-	fmt.Println("[Oana][Rescheduler] \tScoring pods:")
-	glog.V(4).Infof("[Oana][Rescheduler] \tScoring pods:")
-	podInfos := make([]*podScore, 0)
-	// TODO parallelize
-	for _, pod := range pods {
-		// We drop pods that can't be scheduled on the node.
-		if ! podFitsNode(pod, node) {
-			fmt.Println("\t[Oana][Rescheduler] \tPod does not fit node, Can't schedule it on this node")
-			glog.V(4).Infof("[Oana][Rescheduler] \tPod does not fit node, Can't schedule it on this node")
-			continue
-		}
-		podInfos = append(podInfos, &podScore{
-			score: getPodOnNodeImbalanceScore(pod, node),
-			pod:   pod,
-		})
+	glog.Infof("[Oana][Rescheduler][Score] Scoring pods:")
+	var wg sync.WaitGroup
+	wg.Add(len(pods))
+	podScores := make([]*podScore, len(pods))
+
+	for index, pod := range pods {
+		go func(index int) {
+			defer wg.Done()
+
+			// We drop pods that can't be scheduled on the node.
+			if ! podFitsNode(pod, node) {
+				return
+			}
+			podScores[index] = &podScore{
+				score: getPodOnNodeImbalanceScore(pod, node),
+				pod:   pod}
+
+			//podInfos = append(podInfos, &podScore{
+			//	score: getPodOnNodeImbalanceScore(pod, node),
+			//	pod:   pod,
+			//})
+		}(index)
 	}
-	return podInfos
+	wg.Wait()
+
+	cleanedPodScores := make([]*podScore, 0)
+	for _, podScore := range podScores {
+		if podScore != nil {
+			cleanedPodScores = append(cleanedPodScores, podScore)
+		}
+	}
+	return cleanedPodScores
 }
 

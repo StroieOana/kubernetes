@@ -10,8 +10,6 @@ import (
 )
 
 
-
-
 func podFitsNode(pod *apiv1.Pod, nodeInfo *schedulercache.NodeInfo) bool {
 	podCpu := resource_api.GetResourceRequest(pod, apiv1.ResourceCPU)
 	podMemory:= resource_api.GetResourceRequest(pod, apiv1.ResourceMemory)
@@ -24,12 +22,16 @@ func podFitsNode(pod *apiv1.Pod, nodeInfo *schedulercache.NodeInfo) bool {
 
 	fits := nodeCPURequested + podCpu <= nodeCPUAllocatable && nodeMemoryRequested + podMemory <= nodeMemoryAllocatable
 
-	fmt.Printf("\t[Oana][Rescheduler] \tPod %v(%v, %v) fits on node %v (%v/%v %v/%v): %v",
-		pod.Name, podCpu, podMemory, nodeInfo.Node().Name,
-		nodeCPURequested, nodeCPUAllocatable, nodeMemoryRequested, nodeMemoryAllocatable, fits)
-	glog.V(4).Infof("[Oana][Rescheduler] \tPod %v(%v, %v) fits on node %v (%v/%v %v/%v): %v",
-		pod.Name, podCpu, podMemory, nodeInfo.Node().Name,
-		nodeCPURequested, nodeCPUAllocatable, nodeMemoryRequested, nodeMemoryAllocatable, fits)
+	if fits {
+		glog.Infof("[Oana][Rescheduler] Pod %v FITS on node %v",
+			getPodToString(pod), getNodeInfoToString(nodeInfo))
+	} else {
+		glog.Infof("[Oana][Rescheduler] Pod %v DOES NOT FIT on node %v",
+			getPodToString(pod), getNodeInfoToString(nodeInfo))
+	}
+	//fmt.Printf("\t[Oana][Rescheduler] Pod %v(%v, %v) fits on node %v (%v/%v %v/%v): %v",
+	//	pod.Name, podCpu, podMemory, nodeInfo.Node().Name,
+	//	nodeCPURequested, nodeCPUAllocatable, nodeMemoryRequested, nodeMemoryAllocatable, fits)
 
 	return fits
 }
@@ -42,7 +44,7 @@ func getPodOnNodeImbalanceScore(pod *apiv1.Pod, nodeInfo *schedulercache.NodeInf
 	requestedCPU := resource_api.GetResourceRequest(pod, apiv1.ResourceCPU)
 	requestedMem := resource_api.GetResourceRequest(pod, apiv1.ResourceMemory)
 
-	// TODO  diff between allocatable and capacyti
+	// TODO  diff between allocatable and capacity
 	freeCPU := nodeInfo.AllocatableResource().MilliCPU - nodeInfo.RequestedResource().MilliCPU
 	capacityCPU := nodeInfo.AllocatableResource().MilliCPU
 
@@ -53,19 +55,11 @@ func getPodOnNodeImbalanceScore(pod *apiv1.Pod, nodeInfo *schedulercache.NodeInf
 	imbalanceAfter := math.Abs(fractionOfCapacity(freeCPU - requestedCPU, capacityCPU) - fractionOfCapacity(freeMemory - requestedMem, capacityMem))
 
 	score := - (imbalanceAfter - imbalanceBefore)
-	fmt.Printf("\t[Oana][Rescheduler] \tPod %v(%v %v) on node %s has imbalance score %v\n",
-		pod.Name,
-		resource_api.GetResourceRequest(pod, apiv1.ResourceCPU),
-		resource_api.GetResourceRequest(pod, apiv1.ResourceMemory),
-		nodeInfo.Node().Name,
-		score,
-	)
-	glog.V(4).Infof("[Oana][Rescheduler] \tPod %v(%v %v) on node %s has imbalance score %v\n",
-		pod.Name,
-		resource_api.GetResourceRequest(pod, apiv1.ResourceCPU),
-		resource_api.GetResourceRequest(pod, apiv1.ResourceMemory),
-		nodeInfo.Node().Name,
-		score,
+	//fmt.Printf("\t[Oana][Rescheduler] \tPod %v on node %s has imbalance score %v\n",
+	//	getPodToString(pod), nodeInfo.Node().Name, score,
+	//)
+	glog.Infof("[Oana][Rescheduler] Pod %v on node %s has imbalance score %v\n",
+		getPodToString(pod), nodeInfo.Node().Name, score,
 	)
 
 	return score
@@ -86,7 +80,7 @@ func getPodOnNodeFreenessScore(pod *apiv1.Pod, nodeInfo *schedulercache.NodeInfo
 	requestedCPU := resource_api.GetResourceRequest(pod, apiv1.ResourceCPU)
 	requestedMem := resource_api.GetResourceRequest(pod, apiv1.ResourceMemory)
 
-	// TODO  diff between allocatable and capacyti
+	// TODO  diff between allocatable and capacity
 	freeCPU := nodeInfo.AllocatableResource().MilliCPU - nodeInfo.RequestedResource().MilliCPU
 	capacityCPU := nodeInfo.AllocatableResource().MilliCPU
 
@@ -95,20 +89,21 @@ func getPodOnNodeFreenessScore(pod *apiv1.Pod, nodeInfo *schedulercache.NodeInfo
 
 	score := (fractionOfCapacity(freeCPU - requestedCPU, capacityCPU) + fractionOfCapacity(freeMemory - requestedMem, capacityMem))/2
 
-	fmt.Printf("\t[Oana][Rescheduler] \tPod %v(%v %v) on node %s has freeness score %v\n",
-		pod.Name,
-		resource_api.GetResourceRequest(pod, apiv1.ResourceCPU),
-		resource_api.GetResourceRequest(pod, apiv1.ResourceMemory),
-		nodeInfo.Node().Name,
-		score,
-	)
-	glog.V(4).Infof("[Oana][Rescheduler] \tPod %v(%v %v) on node %s has score %v\n",
-		pod.Name,
-		resource_api.GetResourceRequest(pod, apiv1.ResourceCPU),
-		resource_api.GetResourceRequest(pod, apiv1.ResourceMemory),
-		nodeInfo.Node().Name,
-		score,
-	)
+	//fmt.Printf("\t[Oana][Rescheduler] \tPod %v on node %s has freeness score %v\n",
+	//	getPodToString(pod), nodeInfo.Node().Name, score)
+	glog.Infof("[Oana][Rescheduler] Pod %v on node %s has score %v\n",
+		getPodToString(pod), nodeInfo.Node().Name, score)
 
 	return score
+}
+
+func getPodToString(pod *apiv1.Pod) string {
+	return fmt.Sprintf("%v(%v, %v)", pod.Name, resource_api.GetResourceRequest(pod, apiv1.ResourceCPU),
+		resource_api.GetResourceRequest(pod, apiv1.ResourceMemory))
+}
+
+func getNodeInfoToString(nodeInfo *schedulercache.NodeInfo) string {
+	return fmt.Sprintf("%v (%v/%v %v/%v)", nodeInfo.Node().Name,
+		nodeInfo.RequestedResource().MilliCPU, nodeInfo.AllocatableResource().MilliCPU,
+		nodeInfo.RequestedResource().Memory, nodeInfo.AllocatableResource().Memory,)
 }

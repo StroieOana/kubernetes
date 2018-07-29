@@ -35,11 +35,10 @@ func (rescheduler *defaultRescheduler) GetClient()  clientset.Interface {
 	return rescheduler.client
 }
 
-// TODO- move parts of this to common
 func (rescheduler *defaultRescheduler) Schedule(pod *apiv1.Pod, nodeLister algorithm.NodeLister) ([]*algorithm.PodNodeAssignment, error) {
 	nodes, err := nodeLister.List()
-	fmt.Printf("Nr of listed nodes %d\n", len(nodes))
-	glog.V(4).Infof("[Oana][Rescheduler] Nr of listed nodes%d\n", len(nodes))
+	//fmt.Printf("Nr of listed nodes %d\n", len(nodes))
+	glog.Infof("[Oana][Rescheduler] Nr of listed nodes%d\n", len(nodes))
 	if err != nil {
 		return []*algorithm.PodNodeAssignment{}, err
 	}
@@ -50,8 +49,8 @@ func (rescheduler *defaultRescheduler) Schedule(pod *apiv1.Pod, nodeLister algor
 	// Used for all fit and priority funcs.
 	err = rescheduler.cache.UpdateNodeNameToInfoMap(rescheduler.cachedNodeInfoMap)
 	if err != nil {
-		fmt.Println("Error while updating mapping")
-		glog.V(4).Infof("[Oana][Rescheduler] Error while updating mapping %v", err)
+		//fmt.Println("Error while updating mapping")
+		glog.Infof("[Oana][Rescheduler] Error while updating mapping %v", err)
 		return []*algorithm.PodNodeAssignment{}, err
 	}
 
@@ -70,8 +69,8 @@ func (rescheduler *defaultRescheduler) Schedule(pod *apiv1.Pod, nodeLister algor
 
 	newNodeInfos, err := rescheduler.Reschedule(pod, nodeInfos)
 	if err != nil {
-		fmt.Println("Error while rescheduling")
-		glog.V(4).Infof("[Oana][Rescheduler] Error while rescheduling %v", err)
+		//fmt.Println("Error while rescheduling")
+		glog.Infof("[Oana][Rescheduler] Error while rescheduling %v", err)
 		return []*algorithm.PodNodeAssignment{}, err
 	}
 
@@ -103,18 +102,26 @@ func (rescheduler *defaultRescheduler) Reschedule(pod *apiv1.Pod, existingNodes 
 	}
 	// Also add the pod to be scheduled
 	pods = append(pods, pod)
-	fmt.Printf("Nr of pods to reschedule %d\n", len(pods))
-	glog.V(4).Infof("[Oana][Rescheduler] Nr of pods to reschedule %d\n", len(pods))
+	//fmt.Printf("Nr of pods to reschedule %d\n", len(pods))
+	glog.Infof("[Oana][Rescheduler] Nr of pods to reschedule %d\n", len(pods))
 
 	// Create a list with empty nodes from the list of existing nodes
 	nodesInfos := make([]*schedulercache.NodeInfo, 0)
 	for _, nodeInfo := range(existingNodes) {
-		newNodeInfo := schedulercache.NewNodeInfo()
+		podsDifferentNamespace := make([]*apiv1.Pod, 0)
+		for _, p := range(nodeInfo.Pods()) {
+			// The pods that are not in the same namespace will not be reschedule.
+			// We need to leave them on the node (to be taken into consideration when checking resources)
+			if p.Namespace != pod.Namespace {
+				podsDifferentNamespace = append(podsDifferentNamespace, p)
+			}
+		}
+		newNodeInfo := schedulercache.NewNodeInfo(podsDifferentNamespace...)
 		newNodeInfo.SetNode(nodeInfo.Node())
 		nodesInfos = append(nodesInfos, newNodeInfo)
 	}
-	fmt.Printf("Nr of nodes %d\n", len(nodesInfos))
-	glog.V(4).Infof("[Oana][Rescheduler] Nr of nodes %d\n", len(nodesInfos))
+	//fmt.Printf("Nr of nodes %d\n", len(nodesInfos))
+	glog.Infof("[Oana][Rescheduler] Nr of nodes %d\n", len(nodesInfos))
 
 	// Taken from https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/estimator/binpacking_estimator.go#L60
 	// nodeWithPod function returns NodeInfo, which is a copy of nodeInfo argument with an additional pod scheduled on it.
@@ -129,9 +136,9 @@ func (rescheduler *defaultRescheduler) Reschedule(pod *apiv1.Pod, existingNodes 
 	// Sort pods by dimension (multiply resources) - we want to schedule biggest pods first
 	sort.Slice(pods, func(i, j int) bool { return multiplyPodResourceReq(pods[i]) > multiplyPodResourceReq(pods[j])})
 	for _, pod := range(pods) {
-		fmt.Printf("[Oana][Rescheduler] Trying to reschdule pod: %s (%v, %v)", pod.ObjectMeta.UID,
-			resource_api.GetResourceRequest(pod, apiv1.ResourceCPU),
-			resource_api.GetResourceRequest(pod, apiv1.ResourceMemory))
+		//fmt.Printf("[Oana][Rescheduler] Trying to reschdule pod: %s (%v, %v)", pod.ObjectMeta.UID,
+		//	resource_api.GetResourceRequest(pod, apiv1.ResourceCPU),
+		//	resource_api.GetResourceRequest(pod, apiv1.ResourceMemory))
 		nodeInfoScores := rescheduler.score(pod, nodesInfos)
 		if len(nodeInfoScores) == 0 {
 			// Pod does not fit on any node
@@ -159,15 +166,13 @@ func (rescheduler *defaultRescheduler) Reschedule(pod *apiv1.Pod, existingNodes 
 }
 
 func (rescheduler *defaultRescheduler) score(pod *apiv1.Pod, nodeInfos []*schedulercache.NodeInfo) []*nodeInfoScore {
-	fmt.Println("[Oana][Rescheduler] \tScoring nodes:")
-	glog.V(4).Infof("[Oana][Rescheduler] \tScoring nodes:")
+	//fmt.Println("[Oana][Rescheduler] \tScoring nodes:")
+	glog.Infof("[Oana][Rescheduler] \tScoring nodes:")
 	nodeInfoScores := make([]*nodeInfoScore, 0)
 	// TODO parallelize
 	for _, nodeInfo := range nodeInfos {
 		// We drop pods that can't be scheduled on the node.
 		if ! podFitsNode(pod, nodeInfo) {
-			fmt.Println("\t[Oana][Rescheduler] \tPod does not fit node, Can't schedule it on this node")
-			glog.V(4).Infof("[Oana][Rescheduler] \tPod does not fit node, Can't schedule it on this node")
 			continue
 		}
 		// TODO - nicer way of calculating this. Maybe more generic like the priorities
